@@ -7,6 +7,7 @@ from poisson import Poisson
 
 x, y = sp.symbols("x,y")
 
+
 # Below we create a solver that reuses some of the implementation from
 # the 1D solver in poisson.py.
 
@@ -53,7 +54,17 @@ class Poisson2D:
         A : scipy sparse LIL matrix
             The vectorized Laplace operator
         """
-        raise NotImplementedError("The laplace method is not implemented yet.")
+
+        # 1D second order differentiation matrix (already scaled by 1/dx^2)
+        dx = self.p.L / N
+        D2 = self.p.D2(N, dx)
+
+        # Compute the 2D Laplace operator using the Kronecker product
+        I = sparse.eye(N + 1, format="lil")
+        A = sparse.kron(I, D2) + sparse.kron(D2, I)
+
+        return A.tolil()
+        
 
     def assemble(
         self, N: int, f: sp.Expr, ue: sp.Expr
@@ -84,8 +95,30 @@ class Poisson2D:
         Dirichlet boundary conditions using the exact solution ue.
 
         """
-        raise NotImplementedError("The assemble method is not implemented yet.")
 
+        # Compute the 2D Laplace operator
+        A = self.laplace(N)
+
+        # Create the mesh
+        xij, yij = self.create_mesh(N)
+
+        # Evaluate the right-hand side function f at the mesh points
+        b = self.meshfunction(f, xij, yij).ravel()
+
+        # Apply Dirichlet boundary conditions using the exact solution ue
+        boundary_indices = self.get_boundary_indices(N)
+
+        ue_mesh = self.meshfunction(ue, xij, yij)
+        b[boundary_indices] = ue_mesh.ravel()[boundary_indices]
+
+        # Replace boundary rows by u_i = ue_i
+        for i in boundary_indices:
+            A.rows[i] = [i]
+            A.data[i] = [1.0]
+
+        return A.tocsr(), b
+
+    
     def meshfunction(self, u: sp.Expr, xij: np.ndarray, yij: np.ndarray) -> np.ndarray:
         """Return Sympy function as mesh function
 
@@ -97,13 +130,25 @@ class Poisson2D:
         -------
         array - The input function as a mesh function
         """
-        raise NotImplementedError("The meshfunction method is not implemented yet.")
+
+        # Evaluate u at the mesh points (xij, yij). Adding to zeros broadcasts
+        # scalars and single-coordinate results onto the full (N+1, N+1) grid.
+        return np.zeros(np.broadcast(xij, yij).shape) + sp.lambdify((x, y), u)(xij, yij)
+
 
     def get_boundary_indices(self, N: int) -> np.ndarray:
         """Return indices of vectorized matrix that belongs to the boundary"""
-        raise NotImplementedError(
-            "The get_boundary_indices method is not implemented yet."
-        )
+
+        # Create a boolean array to mark boundary points
+        boundary = np.zeros((N + 1, N + 1), dtype=bool)
+
+        # Mark the boundary points as True
+        boundary[0, :] = True
+        boundary[-1, :] = True
+        boundary[:, 0] = True
+        boundary[:, -1] = True
+
+        return np.flatnonzero(boundary.ravel())
 
     def l2_error(self, u: np.ndarray, ue: sp.Expr) -> float:
         """Return l2-error
@@ -120,8 +165,15 @@ class Poisson2D:
         float - The l2-error
 
         """
-        raise NotImplementedError("The l2_error method is not implemented yet.")
 
+        # Evaluate the exact solution on the same mesh as u
+        xij, yij = self.create_mesh(u.shape[0] - 1)
+        ue_mesh = self.meshfunction(ue, xij, yij)
+
+        # l2-error: sqrt(h^2 * sum((u - ue)^2)) = h * ||u - ue||_2
+        return np.linalg.norm(u - ue_mesh) * (self.p.L / (u.shape[0] - 1))  
+
+    
     def __call__(self, N: int, ue: sp.Expr) -> np.ndarray:
         """Solve Poisson's equation with a given manufactured solution
 
@@ -165,7 +217,30 @@ class Poisson2D:
         The value of u(x, y)
 
         """
-        raise NotImplementedError("The eval method is not implemented yet.")
+
+        # Check if the coordinates are within the domain
+        if x < 0 or x > self.p.L or y < 0 or y > self.p.L:
+            raise ValueError("Coordinates (x, y) are outside the domain.")
+
+        # Compute the mesh size
+        N = U.shape[0] - 1
+        h = self.p.L / N
+
+        # Compute the indices of the grid cell containing (x, y).
+        # Clamp to N-1 so that points on the upper boundary (x = L or y = L)
+        # fall in the last cell and are interpolated like any other point.
+        i = min(int(x / h), N - 1)
+        j = min(int(y / h), N - 1)
+
+        # Compute the local coordinates within the grid cell
+        xi = (x - i * h) / h
+        eta = (y - j * h) / h
+        # Perform bilinear interpolation
+        u00 = U[i, j]
+        u10 = U[i + 1, j]
+        u01 = U[i, j + 1]
+        u11 = U[i + 1, j + 1]
+        return (1 - xi) * (1 - eta) * u00 + xi * (1 - eta) * u10 + (1 - xi) * eta * u01 + xi * eta * u11
 
 
 def test_convergence_poisson2d():
